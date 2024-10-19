@@ -1,8 +1,8 @@
 import streamlit as st
 import numpy as np
 import pandas as pd
-from scipy.optimize import minimize, milp, OptimizeResult
-from scipy.optimize import milp, LinearConstraint, Bounds
+from scipy.optimize import minimize, milp, LinearConstraint, Bounds
+from scipy.optimize import linprog, OptimizeResult
 import logging
 
 # Set up logging
@@ -155,132 +155,84 @@ def parse_coefficients(constraint, variables):
 def optimize_model(objective_type, obj_coeffs, constraints, decision_vars, variables, model_type):
     logger.debug(f"Starting optimization with {decision_vars} variables and {len(constraints)} constraints")
     
-    if model_type == "Integer Programming":
-        # Use milp for integer programming
-        c = obj_coeffs if objective_type == "Minimize" else [-coeff for coeff in obj_coeffs]
-        
-        constraint_matrix = []
-        constraint_lb = []
-        constraint_ub = []
-        
-        for constraint in constraints:
-            coeffs, rhs_value, relation = parse_coefficients(constraint, variables)
-            if coeffs is None:
-                raise ValueError(f"Invalid constraint: {constraint}")
-            
-            constraint_matrix.append(coeffs)
-            if relation == '<=':
-                constraint_lb.append(-np.inf)
-                constraint_ub.append(rhs_value)
-            elif relation == '>=':
-                constraint_lb.append(rhs_value)
-                constraint_ub.append(np.inf)
-            else:  # '='
-                constraint_lb.append(rhs_value)
-                constraint_ub.append(rhs_value)
-        
-        integrality = np.ones(decision_vars)  # All variables are integer
-        bounds = Bounds(lb=np.zeros(decision_vars), ub=np.inf * np.ones(decision_vars))
-        
-        constraints = LinearConstraint(constraint_matrix, constraint_lb, constraint_ub)
-        
-        result = milp(c=c, constraints=constraints, integrality=integrality, bounds=bounds)
-        
-        # Convert the result to a format similar to minimize() output
-        return OptimizeResult(x=result.x, fun=result.fun if objective_type == "Minimize" else -result.fun,
-                              success=result.success, status=result.status,
-                              message=result.message)
-    else:
-        # Use minimize for linear and nonlinear programming
-        def objective(x):
-            return np.dot(obj_coeffs, x) * (-1 if objective_type == "Maximize" else 1)
-
-        cons = []
-        for constraint in constraints:
-            coeffs, rhs_value, relation = parse_coefficients(constraint, variables)
-            if coeffs is None:
-                raise ValueError(f"Invalid constraint: {constraint}")
-            
-            if relation == '<=':
-                cons.append({'type': 'ineq', 'fun': lambda x, coef=coeffs, r=rhs_value: r - np.dot(coef, x)})
-            elif relation == '>=':
-                cons.append({'type': 'ineq', 'fun': lambda x, coef=coeffs, r=rhs_value: np.dot(coef, x) - r})
-            else:  # '='
-                cons.append({'type': 'eq', 'fun': lambda x, coef=coeffs, r=rhs_value: np.dot(coef, x) - r})
-
-        bounds = [(0, None) for _ in range(decision_vars)]
-        x0 = np.zeros(decision_vars)
-        
-        try:
-            result = minimize(objective, x0, method='SLSQP', bounds=bounds, constraints=cons)
-            logger.debug(f"Optimization result: {result}")
-            return result
-        except Exception as e:
-            logger.error(f"Error during optimization: {str(e)}")
-            raise RuntimeError(f"Optimization failed: {str(e)}")
-
-def sensitivity_analysis(result, obj_coeffs, constraints, variables):
-    sensitivity = {}
-    for i, var in enumerate(variables):
-        # Objective coefficient sensitivity
-        delta = 0.01 * abs(obj_coeffs[i])
-        obj_coeffs_plus = obj_coeffs.copy()
-        obj_coeffs_plus[i] += delta
-        result_plus = optimize_model("Maximize", obj_coeffs_plus, constraints, len(variables), variables, "Linear Programming")
-        sensitivity[f"{var}_obj_coeff"] = (result_plus.fun - result.fun) / delta
-
-        # Constraint sensitivity (for the first constraint only, as an example)
-        if constraints:
-            coeffs, rhs_value, relation = parse_coefficients(constraints[0], variables)
-            if coeffs is None:
-                continue
-            
-            constraints_plus = constraints.copy()
-            new_rhs = str(float(rhs_value) + delta)
-            constraints_plus[0] = constraints_plus[0].replace(str(rhs_value), new_rhs)
-            result_plus = optimize_model("Maximize", obj_coeffs, constraints_plus, len(variables), variables, "Linear Programming")
-            sensitivity[f"{var}_constraint"] = (result_plus.fun - result.fun) / delta
-
-    return sensitivity
-
-def generate_answer_report(result, variables, obj_coeffs, objective_type, constraints, model_type):
-    report = []
+    # Parse constraints
+    A = []
+    b_lower = []
+    b_upper = []
     
-    # Objective cell
-    obj_value = np.dot(obj_coeffs, result.x)
-    report.append({
-        'Cell': 'Objective',
-        'Name': f'{objective_type} of Objective',
-        'Value': obj_value
-    })
-    
-    # Variable cells
-    for var, value in zip(variables, result.x):
-        report.append({
-            'Cell': 'Variable',
-            'Name': var,
-            'Value': value if model_type != "Integer Programming" else int(round(value))
-        })
-    
-    # Constraints
-    for i, constraint in enumerate(constraints):
+    for constraint in constraints:
         coeffs, rhs_value, relation = parse_coefficients(constraint, variables)
         if coeffs is None:
-            continue
+            raise ValueError(f"Invalid constraint: {constraint}")
         
-        lhs_value = np.dot(coeffs, result.x)
-        status = 'Binding' if np.isclose(lhs_value, rhs_value) else 'Not Binding'
-        slack = rhs_value - lhs_value if relation == '<=' else lhs_value - rhs_value if relation == '>=' else 0
-        
-        report.append({
-            'Cell': 'Constraint',
-            'Name': f'Constraint {i+1}',
-            'Value': lhs_value,
-            'Status': status,
-            'Slack': slack
-        })
+        A.append(coeffs)
+        if relation == '<=':
+            b_lower.append(-np.inf)
+            b_upper.append(rhs_value)
+        elif relation == '>=':
+            b_lower.append(rhs_value)
+            b_upper.append(np.inf)
+        else:  # '='
+            b_lower.append(rhs_value)
+            b_upper.append(rhs_value)
     
-    return pd.DataFrame(report)
+    A = np.array(A)
+    b_lower = np.array(b_lower)
+    b_upper = np.array(b_upper)
+    
+    # Set up bounds
+    bounds = Bounds(lb=np.zeros(decision_vars), ub=np.inf * np.ones(decision_vars))
+    
+    # Set up objective
+    c = np.array(obj_coeffs)
+    if objective_type == "Maximize":
+        c = -c  # Convert maximization to minimization
+    
+    if model_type == "Linear Programming":
+        # Use linprog for linear programming
+        res = linprog(c, A_ub=A, b_ub=b_upper, bounds=bounds, method='revised simplex')
+        
+        # Convert linprog result to OptimizeResult
+        result = OptimizeResult(
+            x=res.x,
+            fun=-res.fun if objective_type == "Maximize" else res.fun,
+            success=res.success,
+            status=res.status,
+            message=res.message
+        )
+    
+    elif model_type == "Integer Programming":
+        # Use milp for integer programming
+        integrality = np.ones(decision_vars)  # All variables are integer
+        constraints = LinearConstraint(A, b_lower, b_upper)
+        
+        res = milp(c=c, constraints=constraints, integrality=integrality, bounds=bounds)
+        
+        # Convert milp result to OptimizeResult
+        result = OptimizeResult(
+            x=res.x,
+            fun=-res.fun if objective_type == "Maximize" else res.fun,
+            success=res.success,
+            status=res.status,
+            message=res.message
+        )
+    
+    else:  # Nonlinear Programming
+        # Use minimize for nonlinear programming
+        constraints = LinearConstraint(A, b_lower, b_upper)
+        
+        def objective(x):
+            return np.dot(c, x)
+        
+        res = minimize(objective, np.zeros(decision_vars), method='SLSQP', bounds=bounds, constraints=constraints)
+        
+        # minimize already returns OptimizeResult, just adjust the objective value if needed
+        result = res
+        if objective_type == "Maximize":
+            result.fun = -result.fun
+    
+    logger.debug(f"Optimization result: {result}")
+    return result
 
 def display_results(result, variables, obj_coeffs, objective_type, constraints, model_type):
     st.header("Optimization Results")
@@ -304,7 +256,7 @@ def display_results(result, variables, obj_coeffs, objective_type, constraints, 
     st.bar_chart(chart_data.set_index('Variable'))
     
     # Display objective value
-    obj_value = np.dot(obj_coeffs, result.x)
+    obj_value = result.fun if objective_type == "Minimize" else -result.fun
     st.subheader("Objective Value")
     st.write(f"The {objective_type.lower()}d value is: {abs(obj_value):.4f}")
     
@@ -346,6 +298,68 @@ def display_results(result, variables, obj_coeffs, objective_type, constraints, 
     
     if not result.success:
         st.warning("Warning: The optimizer couldn't find a perfect solution. The results might not be optimal or might slightly violate some constraints.")
+
+def generate_answer_report(result, variables, obj_coeffs, objective_type, constraints, model_type):
+    report = []
+    
+    # Objective cell
+    obj_value = result.fun if objective_type == "Minimize" else -result.fun
+    report.append({
+        'Cell': 'Objective',
+        'Name': f'{objective_type} of Objective',
+        'Value': obj_value
+    })
+    
+    # Variable cells
+    for var, value in zip(variables, result.x):
+        report.append({
+            'Cell': 'Variable',
+            'Name': var,
+            'Value': value if model_type != "Integer Programming" else int(round(value))
+        })
+    
+    # Constraints
+    for i, constraint in enumerate(constraints):
+        coeffs, rhs_value, relation = parse_coefficients(constraint, variables)
+        if coeffs is None:
+            continue
+        
+        lhs_value = np.dot(coeffs, result.x)
+        status = 'Binding' if np.isclose(lhs_value, rhs_value) else 'Not Binding'
+        slack = rhs_value - lhs_value if relation == '<=' else lhs_value - rhs_value if relation == '>=' else 0
+        
+        report.append({
+            'Cell': 'Constraint',
+            'Name': f'Constraint {i+1}',
+            'Value': lhs_value,
+            'Status': status,
+            'Slack': slack
+        })
+    
+    return pd.DataFrame(report)
+def sensitivity_analysis(result, obj_coeffs, constraints, variables):
+    sensitivity = {}
+    for i, var in enumerate(variables):
+        # Objective coefficient sensitivity
+        delta = 0.01 * abs(obj_coeffs[i])
+        obj_coeffs_plus = obj_coeffs.copy()
+        obj_coeffs_plus[i] += delta
+        result_plus = optimize_model("Maximize", obj_coeffs_plus, constraints, len(variables), variables, "Linear Programming")
+        sensitivity[f"{var}_obj_coeff"] = (result_plus.fun - result.fun) / delta
+
+        # Constraint sensitivity (for the first constraint only, as an example)
+        if constraints:
+            coeffs, rhs_value, relation = parse_coefficients(constraints[0], variables)
+            if coeffs is None:
+                continue
+            
+            constraints_plus = constraints.copy()
+            new_rhs = str(float(rhs_value) + delta)
+            constraints_plus[0] = constraints_plus[0].replace(str(rhs_value), new_rhs)
+            result_plus = optimize_model("Maximize", obj_coeffs, constraints_plus, len(variables), variables, "Linear Programming")
+            sensitivity[f"{var}_constraint"] = (result_plus.fun - result.fun) / delta
+
+    return sensitivity
 
 if __name__ == "__main__":
     main()
