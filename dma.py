@@ -285,6 +285,7 @@ def main():
         - Your objective function and constraints are linear (e.g., maximize profit subject to resource constraints).
         - All variables can take on any real value.
         - Relationships between variables are straightforward and proportional.
+        - **NON-NEGATIVE ASSUMED**
         
         Example: Optimizing product mix to maximize profit given limited resources.
         """)
