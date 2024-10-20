@@ -4,6 +4,7 @@ import pandas as pd
 from scipy.optimize import minimize, linprog, milp, OptimizeResult
 from scipy.optimize import LinearConstraint, Bounds
 import logging
+import altair as alt
 
 # Set up logging
 logging.basicConfig(filename='streamlit_app.log', level=logging.DEBUG, 
@@ -11,6 +12,9 @@ logging.basicConfig(filename='streamlit_app.log', level=logging.DEBUG,
 logger = logging.getLogger(__name__)
 
 def parse_constraint(constraint_expr, variables):
+    logger.debug(f"Parsing constraint: {constraint_expr}")
+    logger.debug(f"Variables: {variables}")
+
     if '<=' in constraint_expr:
         parts = constraint_expr.split('<=')
         relation = '<='
@@ -42,7 +46,7 @@ def parse_constraint(constraint_expr, variables):
             var = term
         
         var = var.strip()
-        var_index = next((i for i, v in enumerate(variables) if v == var), None)
+        var_index = next((i for i, v in enumerate(variables) if v.lower() == var.lower()), None)
         if var_index is None:
             logger.error(f"Variable '{var}' not found in defined variables: {variables}")
             return None, None, None
@@ -55,9 +59,15 @@ def parse_constraint(constraint_expr, variables):
         logger.error(f"Invalid right-hand side value: {rhs}")
         return None, None, None
 
+    logger.debug(f"Parsed constraint: coeffs={coeffs}, rhs={rhs_value}, relation={relation}")
     return coeffs, rhs_value, relation
 
 def linear_optimize(obj_coeffs, constraints, variables, objective_type):
+    logger.debug(f"Starting linear optimization with variables: {variables}")
+    logger.debug(f"Constraints: {constraints}")
+    logger.debug(f"Objective coefficients: {obj_coeffs}")
+    logger.debug(f"Objective type: {objective_type}")
+
     c = obj_coeffs if objective_type == "Minimize" else [-coeff for coeff in obj_coeffs]
     
     A_ub = []
@@ -67,20 +77,33 @@ def linear_optimize(obj_coeffs, constraints, variables, objective_type):
     
     for _, constraint in constraints:
         coeffs, rhs, relation = parse_constraint(constraint, variables)
+        if coeffs is None:
+            raise ValueError(f"Failed to parse constraint: {constraint}")
         if relation == "<=":
             A_ub.append(coeffs)
             b_ub.append(rhs)
         elif relation == ">=":
             A_ub.append([-coeff for coeff in coeffs])
             b_ub.append(-rhs)
-        else:  # "="
+        elif relation == "=":
             A_eq.append(coeffs)
             b_eq.append(rhs)
     
     bounds = [(0, None) for _ in range(len(variables))]
     
-    res = linprog(c, A_ub=A_ub, b_ub=b_ub, A_eq=A_eq, b_eq=b_eq, bounds=bounds, method='revised simplex')
+    logger.debug(f"A_ub: {A_ub}")
+    logger.debug(f"b_ub: {b_ub}")
+    logger.debug(f"A_eq: {A_eq}")
+    logger.debug(f"b_eq: {b_eq}")
+
+    # Only pass A_eq and b_eq if there are equality constraints
+    if A_eq:
+        res = linprog(c, A_ub=A_ub, b_ub=b_ub, A_eq=A_eq, b_eq=b_eq, bounds=bounds, method='revised simplex')
+    else:
+        res = linprog(c, A_ub=A_ub, b_ub=b_ub, bounds=bounds, method='revised simplex')
     
+    logger.debug(f"Optimization result: {res}")
+
     return OptimizeResult(
         x=res.x,
         fun=-res.fun if objective_type == "Maximize" else res.fun,
@@ -91,7 +114,7 @@ def linear_optimize(obj_coeffs, constraints, variables, objective_type):
 
 def nonlinear_optimize(obj_function, constraints, variables, objective_type):
     def objective(x):
-        return eval(obj_function, dict(zip(variables, x)))
+        return -eval(obj_function, dict(zip(variables, x))) if objective_type == "Maximize" else eval(obj_function, dict(zip(variables, x)))
 
     cons = []
     for _, expr in constraints:
@@ -105,15 +128,14 @@ def nonlinear_optimize(obj_function, constraints, variables, objective_type):
             lhs, rhs = expr.split('=')
             cons.append({'type': 'eq', 'fun': lambda x, l=lhs, r=rhs: eval(l, dict(zip(variables, x))) - eval(r, dict(zip(variables, x)))})
 
-    x0 = np.ones(len(variables)) / len(variables)  # Initial guess: equal distribution
-    bounds = [(0, 1) for _ in variables]  # Assuming all variables are proportions between 0 and 1
+    x0 = np.ones(len(variables))  # Initial guess
+    bounds = [(0, None) for _ in variables]  # Non-negative constraints
     
-    res = minimize(objective if objective_type == "Minimize" else lambda x: -objective(x), 
-                   x0, method='SLSQP', constraints=cons, bounds=bounds)
+    res = minimize(objective, x0, method='SLSQP', constraints=cons, bounds=bounds)
     
     return OptimizeResult(
         x=res.x,
-        fun=res.fun if objective_type == "Minimize" else -res.fun,
+        fun=-res.fun if objective_type == "Maximize" else res.fun,
         success=res.success,
         status=res.message,
         message=res.message
@@ -126,8 +148,7 @@ def integer_optimize(obj_coeffs, constraints, variables, objective_type):
     c = np.array(obj_coeffs if objective_type == "Minimize" else [-coeff for coeff in obj_coeffs])
     
     A = []
-    b_lower = []
-    b_upper = []
+    b_ub = []
     
     for constraint_name, constraint in constraints:
         logger.debug(f"Processing constraint: {constraint_name}: {constraint}")
@@ -139,24 +160,33 @@ def integer_optimize(obj_coeffs, constraints, variables, objective_type):
         
         A.append(coeffs)
         if relation == "<=":
-            b_lower.append(-np.inf)
-            b_upper.append(rhs_value)
+            b_ub.append(rhs_value)
         elif relation == ">=":
-            b_lower.append(rhs_value)
-            b_upper.append(np.inf)
+            A[-1] = [-coeff for coeff in A[-1]]
+            b_ub.append(-rhs_value)
+        else:  # "="
+            # For now, treat equality as two inequality constraints
+            A.append([-coeff for coeff in coeffs])
+            b_ub.append(-rhs_value)
+            b_ub.append(rhs_value)
     
     A = np.array(A)
+    b_ub = np.array(b_ub)
+    
     logger.debug(f"Constraint matrix A:\n{A}")
-    logger.debug(f"Lower bounds: {b_lower}")
-    logger.debug(f"Upper bounds: {b_upper}")
+    logger.debug(f"Upper bounds b_ub:\n{b_ub}")
     
     integrality = np.ones(len(variables))  # All variables are integers
     bounds = Bounds(lb=np.zeros(len(variables)), ub=np.inf * np.ones(len(variables)))
     
-    constraints = LinearConstraint(A, b_lower, b_upper)
+    constraints = LinearConstraint(A, -np.inf * np.ones(len(b_ub)), b_ub)
     
     try:
-        res = milp(c=c, constraints=constraints, integrality=integrality, bounds=bounds)
+        res = milp(c=c, 
+                   constraints=constraints,
+                   integrality=integrality,
+                   bounds=bounds)
+        
         logger.debug(f"Optimization result: {res}")
         return OptimizeResult(
             x=res.x,
@@ -170,51 +200,74 @@ def integer_optimize(obj_coeffs, constraints, variables, objective_type):
         raise
 
 def display_results(result, variables, obj_function, objective_type, constraints, model_type):
-    st.header("Optimization Results")
-    
-    # Display optimal solution
-    st.subheader("Optimal Solution")
-    solution_df = pd.DataFrame({
-        'Variable': variables,
-        'Optimal Value': result.x.round().astype(int) if model_type == "Integer Programming" else result.x,
-    })
-    st.dataframe(solution_df)
-    
-    # Plot the solution using Streamlit's native chart
-    st.subheader("Optimal Solution Visualization")
-    chart_data = pd.DataFrame({'Variable': variables, 'Value': result.x.round().astype(int) if model_type == "Integer Programming" else result.x})
-    st.bar_chart(chart_data.set_index('Variable'))
-    
-    # Display objective value
-    st.subheader("Objective Value")
-    st.write(f"The {objective_type.lower()}d value is: {abs(result.fun):.4f}")
-    
-    # Check constraints
-    st.subheader("Constraint Satisfaction")
-    for constraint_name, constraint_expr in constraints:
-        coeffs, rhs_value, relation = parse_constraint(constraint_expr, variables)
-        lhs_value = np.dot(coeffs, result.x)
+    try:
+        st.header("Optimization Results")
         
-        if relation == '<=':
-            satisfied = lhs_value <= rhs_value
-        elif relation == '>=':
-            satisfied = lhs_value >= rhs_value
-        else:  # '='
-            satisfied = np.isclose(lhs_value, rhs_value)
+        # Display optimal solution
+        st.subheader("Optimal Solution")
+        solution_df = pd.DataFrame({
+            'Variable': variables,
+            'Optimal Value': result.x.round(4),
+        })
+        st.table(solution_df)
         
-        st.write(f"{constraint_name}: {'Satisfied' if satisfied else 'Not Satisfied'}")
-        st.write(f"  Left-hand side: {lhs_value:.4f}")
-        st.write(f"  Relation: {relation}")
-        st.write(f"  Right-hand side: {rhs_value:.4f}")
+        # Display objective value
+        st.subheader("Objective Value")
+        st.write(f"The {objective_type.lower()}d value is: {abs(result.fun):.4f}")
+        
+        # Check constraints
+        st.subheader("Constraint Satisfaction")
+        constraint_results = []
+        for constraint_name, constraint_expr in constraints:
+            coeffs, rhs_value, relation = parse_constraint(constraint_expr, variables)
+            if coeffs is not None:
+                lhs_value = np.dot(coeffs, result.x)
+                
+                if relation == '<=':
+                    satisfied = lhs_value <= rhs_value
+                elif relation == '>=':
+                    satisfied = lhs_value >= rhs_value
+                else:  # '='
+                    satisfied = np.isclose(lhs_value, rhs_value)
+                
+                constraint_results.append({
+                    'Constraint': constraint_name,
+                    'Satisfied': 'Yes' if satisfied else 'No',
+                    'Left-hand side': f"{lhs_value:.4f}",
+                    'Relation': relation,
+                    'Right-hand side': f"{rhs_value:.4f}"
+                })
+            else:
+                constraint_results.append({
+                    'Constraint': constraint_name,
+                    'Satisfied': 'N/A',
+                    'Left-hand side': 'N/A',
+                    'Relation': 'N/A',
+                    'Right-hand side': 'N/A'
+                })
+        
+        st.table(pd.DataFrame(constraint_results))
+        
+        # Optimization status
+        st.subheader("Optimization Status")
+        st.write(f"Success: {result.success}")
+        st.write(f"Message: {result.message}")
+        
+        if not result.success:
+            st.warning("Warning: The optimizer couldn't find a perfect solution. The results might not be optimal or might slightly violate some constraints.")
     
-    # Optimization status
-    st.subheader("Optimization Status")
-    st.write(f"Success: {result.success}")
-    st.write(f"Message: {result.message}")
+    except Exception as e:
+        logger.error(f"Error in display_results: {str(e)}")
+        st.error(f"An error occurred while displaying results: {str(e)}")
+        st.write("Debug information:")
+        st.write(f"Result: {result}")
+        st.write(f"Variables: {variables}")
+        st.write(f"Objective function: {obj_function}")
+        st.write(f"Objective type: {objective_type}")
+        st.write(f"Constraints: {constraints}")
+        st.write(f"Model type: {model_type}")
     
-    if not result.success:
-        st.warning("Warning: The optimizer couldn't find a perfect solution. The results might not be optimal or might slightly violate some constraints.")
-
+    
 def main():
     st.title("Decision Optimization Modeling App")
 
@@ -295,7 +348,7 @@ def main():
             relation = st.selectbox("Type of limit", ["<=", "=", ">="], key=f"rel_{i}")
             rhs = st.number_input("Total amount available for this limit", value=0.0, key=f"rhs_{i}")
             
-            # Display the constraint
+            # Construct the constraint expression
             constraint_expr = " + ".join([f"{coeff} * {var}" for var, coeff in zip(variables, constraint_coeffs) if coeff != 0])
             constraint_expr += f" {relation} {rhs}"
         
