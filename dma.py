@@ -5,6 +5,7 @@ from scipy.optimize import minimize, linprog, milp, OptimizeResult
 from scipy.optimize import LinearConstraint, Bounds
 import logging
 import altair as alt
+import traceback
 
 # Set up logging
 logging.basicConfig(filename='streamlit_app.log', level=logging.DEBUG, 
@@ -96,11 +97,21 @@ def linear_optimize(obj_coeffs, constraints, variables, objective_type):
     logger.debug(f"A_eq: {A_eq}")
     logger.debug(f"b_eq: {b_eq}")
 
-    # Only pass A_eq and b_eq if there are equality constraints
-    if A_eq:
-        res = linprog(c, A_ub=A_ub, b_ub=b_ub, A_eq=A_eq, b_eq=b_eq, bounds=bounds, method='revised simplex')
-    else:
-        res = linprog(c, A_ub=A_ub, b_ub=b_ub, bounds=bounds, method='revised simplex')
+    try:
+        # Use 'highs' method instead of 'revised simplex'
+        if A_eq:
+            res = linprog(c, A_ub=A_ub, b_ub=b_ub, A_eq=A_eq, b_eq=b_eq, bounds=bounds, method='highs')
+        else:
+            res = linprog(c, A_ub=A_ub, b_ub=b_ub, bounds=bounds, method='highs')
+    except Exception as e:
+        logger.error(f"Optimization failed: {str(e)}")
+        return OptimizeResult(
+            x=np.zeros(len(variables)),
+            fun=0,
+            success=False,
+            status=-1,
+            message=f"Optimization failed: {str(e)}"
+        )
     
     logger.debug(f"Optimization result: {res}")
 
@@ -111,6 +122,12 @@ def linear_optimize(obj_coeffs, constraints, variables, objective_type):
         status=res.message,
         message=res.message
     )
+
+def main():
+    st.title("Decision Optimization Modeling App")
+
+    # Use st.expander for debug information
+    debug_expander = st.expander("Debug Information", expanded=False)
 
 def nonlinear_optimize(obj_function, constraints, variables, objective_type):
     def objective(x):
@@ -270,6 +287,8 @@ def display_results(result, variables, obj_function, objective_type, constraints
     
 def main():
     st.title("Decision Optimization Modeling App")
+       # Use st.expander for debug information
+    debug_expander = st.expander("Debug Information", expanded=False)
 
     # Step 1: Determine the type of decision model
     st.header("Step 1: Choose Your Decision Model")
@@ -285,7 +304,6 @@ def main():
         - Your objective function and constraints are linear (e.g., maximize profit subject to resource constraints).
         - All variables can take on any real value.
         - Relationships between variables are straightforward and proportional.
-        - **NON-NEGATIVE ASSUMED**
         
         Example: Optimizing product mix to maximize profit given limited resources.
         """)
@@ -356,32 +374,53 @@ def main():
         constraints.append((constraint_name, constraint_expr))
         st.write(f"Limit {i+1} ({constraint_name}): {constraint_expr}")
 
-    # Step 3: Optimization and visualization
+     # Step 3: Optimization and visualization
     if st.button("Find the Best Solution"):
         try:
+            debug_expander.write("Debug: Starting optimization process")
+            logger.debug("Starting optimization process")
+
             if model_type == "Linear Programming":
+                debug_expander.write("Debug: Running linear optimization")
+                logger.debug(f"Linear optimization parameters: obj_coeffs={obj_coeffs}, constraints={constraints}, variables={variables}, objective_type={objective_type}")
                 result = linear_optimize(obj_coeffs, constraints, variables, objective_type)
             elif model_type == "Nonlinear Programming":
+                debug_expander.write("Debug: Running nonlinear optimization")
+                logger.debug(f"Nonlinear optimization parameters: obj_function={obj_function}, constraints={constraints}, variables={variables}, objective_type={objective_type}")
                 result = nonlinear_optimize(obj_function, constraints, variables, objective_type)
             else:  # Integer Programming
+                debug_expander.write("Debug: Running integer optimization")
+                logger.debug(f"Integer optimization parameters: obj_coeffs={obj_coeffs}, constraints={constraints}, variables={variables}, objective_type={objective_type}")
                 result = integer_optimize(obj_coeffs, constraints, variables, objective_type)
             
+            debug_expander.write("Debug: Optimization completed")
+            logger.debug("Optimization completed")
+            
+            debug_expander.write("Debug: Displaying results")
+            logger.debug("Displaying results")
             display_results(result, variables, obj_function if model_type == "Nonlinear Programming" else obj_coeffs, objective_type, constraints, model_type)
+        
         except Exception as e:
             st.error(f"An error occurred during optimization: {str(e)}")
             logger.exception("Error during optimization")
-            st.write("Debug Information:")
-            st.write(f"Objective Type: {objective_type}")
-            st.write(f"Objective Function: {obj_function if model_type == 'Nonlinear Programming' else obj_coeffs}")
-            st.write(f"Constraints: {constraints}")
-            st.write(f"Decision Variables: {len(variables)}")
-            st.write(f"Variables: {variables}")
-            st.write(f"Model Type: {model_type}")
+            debug_expander.write("Debug Information:")
+            debug_expander.write(f"Objective Type: {objective_type}")
+            debug_expander.write(f"Objective Function: {obj_function if model_type == 'Nonlinear Programming' else obj_coeffs}")
+            debug_expander.write(f"Constraints: {constraints}")
+            debug_expander.write(f"Decision Variables: {variables}")
+            debug_expander.write(f"Model Type: {model_type}")
+            
+            # Display the full traceback
+            debug_expander.write("Full error traceback:")
+            debug_expander.code(traceback.format_exc())
             
             # Display the log
-            st.write("Log Output:")
-            with open("streamlit_app.log", "r") as log_file:
-                st.code(log_file.read())
+            debug_expander.write("Log Output:")
+            try:
+                with open("streamlit_app.log", "r") as log_file:
+                    debug_expander.code(log_file.read())
+            except FileNotFoundError:
+                debug_expander.write("Log file not found. Make sure you have write permissions in the current directory.")
 
 if __name__ == "__main__":
     main()
