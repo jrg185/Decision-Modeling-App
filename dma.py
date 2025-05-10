@@ -6,6 +6,8 @@ from scipy.optimize import LinearConstraint, Bounds
 import logging
 import altair as alt
 import traceback
+import openpyxl
+import io
 
 # Set up logging
 logging.basicConfig(filename='streamlit_app.log', level=logging.DEBUG, 
@@ -122,12 +124,6 @@ def linear_optimize(obj_coeffs, constraints, variables, objective_type):
         status=res.message,
         message=res.message
     )
-
-def main():
-    st.title("Decision Optimization Modeling App")
-
-    # Use st.expander for debug information
-    debug_expander = st.expander("Debug Information", expanded=False)
 
 def nonlinear_optimize(obj_function, constraints, variables, objective_type):
     def objective(x):
@@ -284,143 +280,252 @@ def display_results(result, variables, obj_function, objective_type, constraints
         st.write(f"Constraints: {constraints}")
         st.write(f"Model type: {model_type}")
     
-    
+def perform_sensitivity_analysis(result, variables, obj_coeffs, constraints, objective_type, variation=0.1):
+    sensitivity_results = []
+    base_objective = result.fun
+
+    # Analyze objective coefficients
+    for i, coeff in enumerate(obj_coeffs):
+        varied_coeffs = obj_coeffs.copy()
+        varied_coeffs[i] = coeff * (1 + variation)
+        up_result = linear_optimize(varied_coeffs, constraints, variables, objective_type)
+
+        varied_coeffs[i] = coeff * (1 - variation)
+        down_result = linear_optimize(varied_coeffs, constraints, variables, objective_type)
+
+        sensitivity_results.append({
+            'Parameter': f'Objective Coefficient {variables[i]}',
+            'Base Value': coeff,
+            'Up Impact': (up_result.fun - base_objective) / base_objective * 100,
+            'Down Impact': (down_result.fun - base_objective) / base_objective * 100
+        })
+
+    return pd.DataFrame(sensitivity_results)
+
+def export_to_excel(result, variables, sensitivity_df):
+    output = io.BytesIO()
+    with pd.ExcelWriter(output, engine='openpyxl') as writer:
+        # Results sheet
+        results_df = pd.DataFrame({
+            'Variable': variables,
+            'Optimal Value': result.x.round(4)
+        })
+        results_df.to_excel(writer, sheet_name='Optimization Results', index=False)
+
+        # Sensitivity sheet
+        sensitivity_df.to_excel(writer, sheet_name='Sensitivity Analysis', index=False)
+
+    return output.getvalue()
+
 def main():
-    st.title("Decision Optimization Modeling App")
+    st.set_page_config(layout="wide")
+
+    # Sidebar
+    st.sidebar.title("Navigation")
+    page = st.sidebar.radio("Go to", ["Optimization", "Sensitivity Analysis"])
+
+    if page == "Optimization":
+        st.title("Decision Optimization Modeling App")
        # Use st.expander for debug information
-    debug_expander = st.expander("Debug Information", expanded=False)
+        debug_expander = st.expander("Debug Information", expanded=False)
 
-    # Step 1: Determine the type of decision model
-    st.header("Step 1: Choose Your Decision Model")
-    model_type = st.radio(
-        "What type of decision model do you need?",
-        ("Linear Programming", "Nonlinear Programming", "Integer Programming")
-    )
+        # Use tabs for different model types
+        model_type = st.radio(
+            "What type of decision model do you need?",
+            ("Linear Programming", "Nonlinear Programming", "Integer Programming"),
+            horizontal=True
+        )
 
-    # Provide information about each model type
-    if model_type == "Linear Programming":
-        st.info("""
-        Linear Programming is suitable when:
-        - Your objective function and constraints are linear (e.g., maximize profit subject to resource constraints).
-        - All variables can take on any real value.
-        - Relationships between variables are straightforward and proportional.
+        # Provide information about each model type
+        if model_type == "Linear Programming":
+            st.info("""
+            Linear Programming is suitable when:
+            - Your objective function and constraints are linear (e.g., maximize profit subject to resource constraints).
+            - All variables can take on any real value.
+            - Relationships between variables are straightforward and proportional.
+            
+            Example: Optimizing product mix to maximize profit given limited resources.
+            """)
+        elif model_type == "Nonlinear Programming":
+            st.info("""
+            Nonlinear Programming is appropriate when:
+            - Your objective function or constraints have nonlinear relationships (e.g., quadratic, exponential).
+            - You're dealing with more complex systems or behaviors.
+            - Variables can take on any real value, but their relationships are not strictly linear.
+            
+            Example: Optimizing chemical processes where reactions follow nonlinear rates.
+            """)
+        else:  # Integer Programming
+            st.info("""
+            Integer Programming is used when:
+            - Some or all of your variables must be integers.
+            - You're dealing with indivisible units or yes/no decisions.
+            - Your problem involves discrete choices.
+            
+            Example: Determining the optimal number of machines to purchase, where fractional machines don't make sense.
+            """)
+
+        # Step 2: Get user inputs
+        st.header("Step 2: Model Parameters")
         
-        Example: Optimizing product mix to maximize profit given limited resources.
-        """)
-    elif model_type == "Nonlinear Programming":
-        st.info("""
-        Nonlinear Programming is appropriate when:
-        - Your objective function or constraints have nonlinear relationships (e.g., quadratic, exponential).
-        - You're dealing with more complex systems or behaviors.
-        - Variables can take on any real value, but their relationships are not strictly linear.
+        # Number of decision variables
+        st.subheader("2.1 Define Your Variables")
+        st.write("What are the things you can change in your problem? (e.g., products, resources)")
+        decision_vars = st.number_input("How many different variables do you have?", min_value=1, value=2)
+        variables = [st.text_input(f"Name for Variable {i+1}", value=f"x{i+1}", key=f"var_name_{i}") for i in range(decision_vars)]
         
-        Example: Optimizing chemical processes where reactions follow nonlinear rates.
-        """)
-    else:  # Integer Programming
-        st.info("""
-        Integer Programming is used when:
-        - Some or all of your variables must be integers.
-        - You're dealing with indivisible units or yes/no decisions.
-        - Your problem involves discrete choices.
+        # Objective function
+        st.subheader("2.2 Set Up Your Goal")
+        objective_type = st.radio("Do you want to maximize or minimize?", ("Maximize", "Minimize"))
         
-        Example: Determining the optimal number of machines to purchase, where fractional machines don't make sense.
-        """)
-
-    # Step 2: Get user inputs
-    st.header("Step 2: Model Parameters")
-    
-    # Number of decision variables
-    st.subheader("2.1 Define Your Variables")
-    st.write("What are the things you can change in your problem? (e.g., products, resources)")
-    decision_vars = st.number_input("How many different variables do you have?", min_value=1, value=2)
-    variables = [st.text_input(f"Name for Variable {i+1}", value=f"x{i+1}", key=f"var_name_{i}") for i in range(decision_vars)]
-    
-    # Objective function
-    st.subheader("2.2 Set Up Your Goal")
-    objective_type = st.radio("Do you want to maximize or minimize?", ("Maximize", "Minimize"))
-    
-    if model_type == "Nonlinear Programming":
-        st.write("Enter your objective function using Python syntax. Use the variable names you defined above.")
-        st.write("Example: 100 * (x1**0.5 + x2**0.5) - 0.05 * (x1**2 + x2**2)")
-        obj_function = st.text_input("Objective Function:", value="100 * (x1**0.5 + x2**0.5) - 0.05 * (x1**2 + x2**2)")
-    else:
-        st.write("For each variable, how much does it contribute to your goal?")
-        obj_coeffs = [st.number_input(f"Value per unit of {var}", value=1.0, key=f"obj_{i}") for i, var in enumerate(variables)]
-    
-    # Display the objective function
-    if model_type != "Nonlinear Programming":
-        obj_function = " + ".join([f"{coeff} * {var}" for var, coeff in zip(variables, obj_coeffs) if coeff != 0])
-        st.write(f"Your goal: {objective_type} Z = {obj_function}")
-
-    # Constraints
-    st.subheader("2.3 Add Your Limits")
-    st.write("What restrictions or limits do you have? (e.g., budget, time, space)")
-    num_constraints = st.number_input("How many limits do you have?", min_value=0, value=1)
-    constraints = []
-    for i in range(num_constraints):
-        st.write(f"Limit {i+1}:")
-        constraint_name = st.text_input(f"Name of this limit (e.g., 'Budget', 'Time available')", key=f"cons_name_{i}")
         if model_type == "Nonlinear Programming":
-            constraint_expr = st.text_input(f"Enter constraint (e.g., x1 + x2 <= 10)", key=f"cons_expr_{i}")
+            st.write("Enter your objective function using Python syntax. Use the variable names you defined above.")
+            st.write("Example: 100 * (x1**0.5 + x2**0.5) - 0.05 * (x1**2 + x2**2)")
+            obj_function = st.text_input("Objective Function:", value="100 * (x1**0.5 + x2**0.5) - 0.05 * (x1**2 + x2**2)")
         else:
-            constraint_coeffs = [st.number_input(f"How much of this limit does one unit of {var} use?", value=0.0, key=f"cons_{i}_{j}") for j, var in enumerate(variables)]
-            relation = st.selectbox("Type of limit", ["<=", "=", ">="], key=f"rel_{i}")
-            rhs = st.number_input("Total amount available for this limit", value=0.0, key=f"rhs_{i}")
-            
-            # Construct the constraint expression
-            constraint_expr = " + ".join([f"{coeff} * {var}" for var, coeff in zip(variables, constraint_coeffs) if coeff != 0])
-            constraint_expr += f" {relation} {rhs}"
+            st.write("For each variable, how much does it contribute to your goal?")
+            obj_coeffs = [st.number_input(f"Value per unit of {var}", value=1.0, key=f"obj_{i}") for i, var in enumerate(variables)]
         
-        constraints.append((constraint_name, constraint_expr))
-        st.write(f"Limit {i+1} ({constraint_name}): {constraint_expr}")
+        # Display the objective function
+        if model_type != "Nonlinear Programming":
+            obj_function = " + ".join([f"{coeff} * {var}" for var, coeff in zip(variables, obj_coeffs) if coeff != 0])
+            st.write(f"Your goal: {objective_type} Z = {obj_function}")
 
-     # Step 3: Optimization and visualization
-    if st.button("Find the Best Solution"):
-        try:
-            debug_expander.write("Debug: Starting optimization process")
-            logger.debug("Starting optimization process")
+        # Constraints
+        st.subheader("2.3 Add Your Limits")
+        st.write("What restrictions or limits do you have? (e.g., budget, time, space)")
+        num_constraints = st.number_input("How many limits do you have?", min_value=0, value=1)
+        constraints = []
+        for i in range(num_constraints):
+            st.write(f"Limit {i+1}:")
+            constraint_name = st.text_input(f"Name of this limit (e.g., 'Budget', 'Time available')", key=f"cons_name_{i}")
+            if model_type == "Nonlinear Programming":
+                constraint_expr = st.text_input(f"Enter constraint (e.g., x1 + x2 <= 10)", key=f"cons_expr_{i}")
+            else:
+                constraint_coeffs = [st.number_input(f"How much of this limit does one unit of {var} use?", value=0.0, key=f"cons_{i}_{j}") for j, var in enumerate(variables)]
+                relation = st.selectbox("Type of limit", ["<=", "=", ">="], key=f"rel_{i}")
+                rhs = st.number_input("Total amount available for this limit", value=0.0, key=f"rhs_{i}")
+                
+                # Construct the constraint expression
+                constraint_expr = " + ".join([f"{coeff} * {var}" for var, coeff in zip(variables, constraint_coeffs) if coeff != 0])
+                constraint_expr += f" {relation} {rhs}"
+            
+            constraints.append((constraint_name, constraint_expr))
+            st.write(f"Limit {i+1} ({constraint_name}): {constraint_expr}")
 
-            if model_type == "Linear Programming":
-                debug_expander.write("Debug: Running linear optimization")
-                logger.debug(f"Linear optimization parameters: obj_coeffs={obj_coeffs}, constraints={constraints}, variables={variables}, objective_type={objective_type}")
-                result = linear_optimize(obj_coeffs, constraints, variables, objective_type)
-            elif model_type == "Nonlinear Programming":
-                debug_expander.write("Debug: Running nonlinear optimization")
-                logger.debug(f"Nonlinear optimization parameters: obj_function={obj_function}, constraints={constraints}, variables={variables}, objective_type={objective_type}")
-                result = nonlinear_optimize(obj_function, constraints, variables, objective_type)
-            else:  # Integer Programming
-                debug_expander.write("Debug: Running integer optimization")
-                logger.debug(f"Integer optimization parameters: obj_coeffs={obj_coeffs}, constraints={constraints}, variables={variables}, objective_type={objective_type}")
-                result = integer_optimize(obj_coeffs, constraints, variables, objective_type)
-            
-            debug_expander.write("Debug: Optimization completed")
-            logger.debug("Optimization completed")
-            
-            debug_expander.write("Debug: Displaying results")
-            logger.debug("Displaying results")
-            display_results(result, variables, obj_function if model_type == "Nonlinear Programming" else obj_coeffs, objective_type, constraints, model_type)
-        
-        except Exception as e:
-            st.error(f"An error occurred during optimization: {str(e)}")
-            logger.exception("Error during optimization")
-            debug_expander.write("Debug Information:")
-            debug_expander.write(f"Objective Type: {objective_type}")
-            debug_expander.write(f"Objective Function: {obj_function if model_type == 'Nonlinear Programming' else obj_coeffs}")
-            debug_expander.write(f"Constraints: {constraints}")
-            debug_expander.write(f"Decision Variables: {variables}")
-            debug_expander.write(f"Model Type: {model_type}")
-            
-            # Display the full traceback
-            debug_expander.write("Full error traceback:")
-            debug_expander.code(traceback.format_exc())
-            
-            # Display the log
-            debug_expander.write("Log Output:")
+         # Step 3: Optimization and visualization
+        if st.button("Find the Best Solution"):
             try:
-                with open("streamlit_app.log", "r") as log_file:
-                    debug_expander.code(log_file.read())
-            except FileNotFoundError:
-                debug_expander.write("Log file not found. Make sure you have write permissions in the current directory.")
+                debug_expander.write("Debug: Starting optimization process")
+                logger.debug("Starting optimization process")
+
+                if model_type == "Linear Programming":
+                    debug_expander.write("Debug: Running linear optimization")
+                    logger.debug(f"Linear optimization parameters: obj_coeffs={obj_coeffs}, constraints={constraints}, variables={variables}, objective_type={objective_type}")
+                    result = linear_optimize(obj_coeffs, constraints, variables, objective_type)
+                elif model_type == "Nonlinear Programming":
+                    debug_expander.write("Debug: Running nonlinear optimization")
+                    logger.debug(f"Nonlinear optimization parameters: obj_function={obj_function}, constraints={constraints}, variables={variables}, objective_type={objective_type}")
+                    result = nonlinear_optimize(obj_function, constraints, variables, objective_type)
+                else:  # Integer Programming
+                    debug_expander.write("Debug: Running integer optimization")
+                    logger.debug(f"Integer optimization parameters: obj_coeffs={obj_coeffs}, constraints={constraints}, variables={variables}, objective_type={objective_type}")
+                    result = integer_optimize(obj_coeffs, constraints, variables, objective_type)
+                
+                debug_expander.write("Debug: Optimization completed")
+                logger.debug("Optimization completed")
+                
+                debug_expander.write("Debug: Displaying results")
+                logger.debug("Displaying results")
+                display_results(result, variables, obj_function if model_type == "Nonlinear Programming" else obj_coeffs, objective_type, constraints, model_type)
+                # Store results in session state for sensitivity analysis
+                st.session_state.last_result = result
+                st.session_state.last_variables = variables
+                st.session_state.last_obj_coeffs = obj_coeffs
+                st.session_state.last_constraints = constraints
+                st.session_state.last_objective_type = objective_type
+
+                # Add export button
+                if result.success:
+                    st.download_button(
+                        label="Export Results to Excel",
+                        data=export_to_excel(result, variables, pd.DataFrame()),
+                        file_name="optimization_results.xlsx",
+                        mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
+                    )
+            
+            except Exception as e:
+                st.error(f"An error occurred during optimization: {str(e)}")
+                logger.exception("Error during optimization")
+                debug_expander.write("Debug Information:")
+                debug_expander.write(f"Objective Type: {objective_type}")
+                debug_expander.write(f"Objective Function: {obj_function if model_type == 'Nonlinear Programming' else obj_coeffs}")
+                debug_expander.write(f"Constraints: {constraints}")
+                debug_expander.write(f"Decision Variables: {variables}")
+                debug_expander.write(f"Model Type: {model_type}")
+                
+                # Display the full traceback
+                debug_expander.write("Full error traceback:")
+                debug_expander.code(traceback.format_exc())
+                
+                # Display the log
+                debug_expander.write("Log Output:")
+                try:
+                    with open("streamlit_app.log", "r") as log_file:
+                        debug_expander.code(log_file.read())
+                except FileNotFoundError:
+                    debug_expander.write("Log file not found. Make sure you have write permissions in the current directory.")
+
+    else:  # Sensitivity Analysis page
+        st.title("Sensitivity Analysis")
+
+        if 'last_result' not in st.session_state:
+            st.warning("Please run an optimization first!")
+            return
+
+        variation = st.slider("Variation Percentage", 1, 50, 10) / 100
+
+        if 'last_obj_coeffs' in st.session_state:
+            sensitivity_df = perform_sensitivity_analysis(
+                st.session_state.last_result,
+                st.session_state.last_variables,
+                st.session_state.last_obj_coeffs,
+                st.session_state.last_constraints,
+                st.session_state.last_objective_type,
+                variation
+            )
+
+            # Display sensitivity results
+            st.subheader("Sensitivity Analysis Results")
+            st.dataframe(sensitivity_df)
+
+            # Tornado chart
+            tornado_chart = alt.Chart(sensitivity_df).transform_fold(
+                ['Up Impact', 'Down Impact'],
+                as_=['Impact Type', 'Impact']
+            ).mark_bar().encode(
+                y='Parameter:N',
+                x='Impact:Q',
+                color='Impact Type:N'
+            ).properties(
+                width=600,
+                height=400
+            )
+            st.altair_chart(tornado_chart)
+
+            # Export button for sensitivity analysis
+            st.download_button(
+                label="Export Sensitivity Analysis to Excel",
+                data=export_to_excel(
+                    st.session_state.last_result,
+                    st.session_state.last_variables,
+                    sensitivity_df
+                ),
+                file_name="optimization_with_sensitivity.xlsx",
+                mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
+            )
+        else:
+            st.write("Objective coefficients not available. Please rerun the optimization with a linear or integer programming model.")
 
 if __name__ == "__main__":
     main()
