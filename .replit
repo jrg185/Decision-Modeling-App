@@ -1,0 +1,9 @@
+modules = ["python-3.12"]
+run = "streamlit run undefined"
+
+[nix]
+channel = "stable-24_05"
+packages = ["arrow-cpp", "cacert", "cairo", "cargo", "chromedriver", "ffmpeg-full", "freetype", "ghostscript", "glibcLocales", "gobject-introspection", "gtk3", "lcms2", "libcxx", "libiconv", "libimagequant", "libjpeg", "libtiff", "libwebp", "libxcrypt", "openjpeg", "pkg-config", "qhull", "rustc", "tcl", "tk", "xsimd", "zlib"]
+
+[deployment]
+run = ["sh", "-c", "streamlit run undefined"]
