@@ -6,4 +6,16 @@ channel = "stable-24_05"
 packages = ["arrow-cpp", "cacert", "cairo", "cargo", "chromedriver", "ffmpeg-full", "freetype", "ghostscript", "glibcLocales", "gobject-introspection", "gtk3", "lcms2", "libcxx", "libiconv", "libimagequant", "libjpeg", "libtiff", "libwebp", "libxcrypt", "openjpeg", "pkg-config", "qhull", "rustc", "tcl", "tk", "xsimd", "zlib"]
 
 [deployment]
-run = ["sh", "-c", "streamlit run undefined"]
+run = ["sh", "-c", "streamlit run dma.py --server.port 5000 --server.address 0.0.0.0"]
+
+[workflows]
+runButton = "Run"
+
+[[workflows.workflow]]
+name = "Run"
+author = 41448020
+mode = "sequential"
+
+[[workflows.workflow.tasks]]
+task = "shell.exec"
+args = "streamlit run dma.py"
